@@ -1,0 +1,107 @@
+# Reusable workflow: Build Docker image and push to GCP Artifact Registry.
+# Called by app repos for PR builds (dev tag) and release builds (semver + latest).
+name: Docker Build & Push to AR
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: "Image name (e.g. fieldflow). Pushed to REGISTRY/PROJECT/REPO/IMAGE-NAME"
+        required: true
+        type: string
+      registry:
+        description: "AR registry host"
+        required: false
+        type: string
+        default: "us-west1-docker.pkg.dev"
+      project-id:
+        description: "GCP project ID"
+        required: false
+        type: string
+        default: "sandbox-438722"
+      ar-repo:
+        description: "Artifact Registry repository name"
+        required: false
+        type: string
+        default: "apps"
+      dockerfile:
+        description: "Path to Dockerfile"
+        required: false
+        type: string
+        default: "Dockerfile"
+      build-args:
+        description: "Docker build args (newline-separated KEY=VALUE)"
+        required: false
+        type: string
+        default: ""
+      tags:
+        description: "Comma-separated tags to apply. If empty, auto-detected from trigger."
+        required: false
+        type: string
+        default: ""
+    secrets:
+      GCP_SA_KEY:
+        description: "GCP service account key JSON for AR push"
+        required: true
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ inputs.registry }} --quiet
+
+      - name: Determine tags
+        id: tags
+        run: |
+          FULL_IMAGE="${{ inputs.registry }}/${{ inputs.project-id }}/${{ inputs.ar-repo }}/${{ inputs.image-name }}"
+
+          if [[ -n "${{ inputs.tags }}" ]]; then
+            # Explicit tags provided
+            TAGS=""
+            IFS=',' read -ra TAG_ARRAY <<< "${{ inputs.tags }}"
+            for tag in "${TAG_ARRAY[@]}"; do
+              tag=$(echo "$tag" | xargs)  # trim whitespace
+              TAGS="${TAGS}${FULL_IMAGE}:${tag}\n"
+            done
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            TAGS="${FULL_IMAGE}:pr-${{ github.event.number }}"
+          elif [[ "${{ github.event_name }}" == "release" ]]; then
+            TAGS="${FULL_IMAGE}:${{ github.event.release.tag_name }}\n${FULL_IMAGE}:latest"
+          elif [[ "${{ github.event_name }}" == "push" ]]; then
+            SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+            TAGS="${FULL_IMAGE}:sha-${SHORT_SHA}\n${FULL_IMAGE}:latest"
+          else
+            TAGS="${FULL_IMAGE}:latest"
+          fi
+
+          echo -e "$TAGS" | grep -v '^$' > /tmp/tags.txt
+          echo "tags<<EOF" >> $GITHUB_OUTPUT
+          cat /tmp/tags.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "Tags to build:"
+          cat /tmp/tags.txt
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ inputs.dockerfile }}
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          build-args: ${{ inputs.build-args }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

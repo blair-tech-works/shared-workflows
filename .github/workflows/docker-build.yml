@@ -61,10 +61,23 @@ jobs:
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker ${{ inputs.registry }} --quiet
 
+      - name: Extract version from package.json
+        id: version
+        run: |
+          if [[ -f package.json ]]; then
+            VERSION=$(node -p "require('./package.json').version" 2>/dev/null || echo "")
+            echo "version=${VERSION}" >> $GITHUB_OUTPUT
+            echo "Detected version: ${VERSION:-<none>}"
+          else
+            echo "version=" >> $GITHUB_OUTPUT
+            echo "No package.json found"
+          fi
+
       - name: Determine tags
         id: tags
         run: |
           FULL_IMAGE="${{ inputs.registry }}/${{ inputs.project-id }}/${{ inputs.ar-repo }}/${{ inputs.image-name }}"
+          VERSION="${{ steps.version.outputs.version }}"
 
           if [[ -n "${{ inputs.tags }}" ]]; then
             # Explicit tags provided
@@ -76,11 +89,15 @@ jobs:
             done
           elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
             TAGS="${FULL_IMAGE}:pr-${{ github.event.number }}"
-          elif [[ "${{ github.event_name }}" == "release" ]]; then
-            TAGS="${FULL_IMAGE}:${{ github.event.release.tag_name }}\n${FULL_IMAGE}:latest"
           elif [[ "${{ github.event_name }}" == "push" ]]; then
             SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
             TAGS="${FULL_IMAGE}:sha-${SHORT_SHA}\n${FULL_IMAGE}:latest"
+            # Add semver tag from package.json if available
+            if [[ -n "$VERSION" ]]; then
+              TAGS="${TAGS}\n${FULL_IMAGE}:${VERSION}"
+            fi
+          elif [[ "${{ github.event_name }}" == "release" ]]; then
+            TAGS="${FULL_IMAGE}:${{ github.event.release.tag_name }}\n${FULL_IMAGE}:latest"
           else
             TAGS="${FULL_IMAGE}:latest"
           fi
